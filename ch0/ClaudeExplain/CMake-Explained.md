@@ -1,20 +1,83 @@
-# CMake explained for this project
+# CMake Reference: CSAPP3e Study Project
 
-This file configures a C project that builds one executable per chapter directory (`ch0`, `ch1`, ...). It sets compiler standards, debug flags, sanitizer support, and common warning/link settings for every chapter target.
+**Layout:** one executable per chapter directory (`ch0/`, `ch1/`, …), shared flags, optional sanitizers, auto-discovered sources.
 
-## 1) Required CMake version and project definition
+```text
+.
+├── CMakeLists.txt
+├── include/          # shared headers
+├── ch0/main.c
+├── ch1/*.c
+└── ...
+```
+
+---
+
+## 1. Full File
+
+```cmake
+cmake_minimum_required(VERSION 4.3)
+project(CSAPP3e_study LANGUAGES C)
+
+set(CMAKE_C_STANDARD 23)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
+endif()
+set(CMAKE_C_FLAGS_DEBUG "-Og -g3")
+
+option(STUDY_SANITIZE "Enable ASan + UBSan" OFF)
+find_package(Threads REQUIRED)
+
+add_library(study_options INTERFACE)
+target_compile_options(study_options INTERFACE
+  -Wall -Wextra -Wconversion -Wsign-compare -fno-common)
+target_link_libraries(study_options INTERFACE Threads::Threads m)
+
+if(STUDY_SANITIZE)
+  target_compile_options(study_options INTERFACE
+    -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(study_options INTERFACE -fsanitize=address,undefined)
+endif()
+
+file(GLOB chapter_dirs RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
+     ${PROJECT_SOURCE_DIR}/ch[0-9]*)
+foreach(dir IN LISTS chapter_dirs)
+  if(IS_DIRECTORY ${PROJECT_SOURCE_DIR}/${dir})
+    file(GLOB srcs CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/${dir}/*.c)
+    if(srcs)
+      add_executable(${dir} ${srcs})
+      target_include_directories(${dir} PRIVATE
+        ${PROJECT_SOURCE_DIR}/${dir} ${PROJECT_SOURCE_DIR}/include)
+      target_link_libraries(${dir} PRIVATE study_options)
+    endif()
+  endif()
+endforeach()
+```
+
+Changes versus the earlier version: `CMAKE_SOURCE_DIR` → `PROJECT_SOURCE_DIR` (correct when this project is added via `add_subdirectory`), and glob `ch*` → `ch[0-9]*` (does not match unrelated names such as `check/` or `charts.txt`).
+
+---
+
+## 2. Project Declaration
 
 ```cmake
 cmake_minimum_required(VERSION 4.3)
 project(CSAPP3e_study LANGUAGES C)
 ```
 
-- `cmake_minimum_required(VERSION 4.3)`: tells CMake the minimum required version. If the environment has an older CMake, configuration stops.
-- `project(CSAPP3e_study LANGUAGES C)`: declares the project name and says this project uses the C language.
+| Item | Effect |
+|---|---|
+| `cmake_minimum_required(VERSION X)` | Fails configuration on older CMake **and** sets all policies introduced up to `X` to `NEW`. Must come first. |
+| `VERSION 3.25...4.3` | Range form: minimum 3.25, policy behavior of 4.3 when available. Lowers the hard requirement without losing new behavior. |
+| `project(... LANGUAGES C)` | Sets `PROJECT_NAME`, `PROJECT_SOURCE_DIR`, `PROJECT_BINARY_DIR`; enables only C (default would also probe C++, adding configure time and a C++ compiler requirement). |
 
-This is the entry point of the build.
+---
 
-## 2) C language standard
+## 3. Language Standard
 
 ```cmake
 set(CMAKE_C_STANDARD 23)
@@ -22,235 +85,193 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS ON)
 ```
 
-- `CMAKE_C_STANDARD 23`: requests C23.
-- `CMAKE_C_STANDARD_REQUIRED ON`: CMake will error if the compiler cannot fully support C23.
-- `CMAKE_C_EXTENSIONS ON`: allows compiler-specific GNU extensions. This is intentionally set so the project can use POSIX/GNU-style APIs (for example, `fork`, `signals`, `sockets`, `asm`). Without this, some compilers may switch to a stricter non-extended mode.
+| Variable | Effect |
+|---|---|
+| `CMAKE_C_STANDARD 23` | Requests C23. Emitted flag: `-std=gnu23` (GCC ≥ 14, Clang ≥ 18), `-std=gnu2x` on older compilers. |
+| `CMAKE_C_STANDARD_REQUIRED ON` | Configure **fails** if the compiler lacks the standard. `OFF` silently decays to the closest older standard. |
+| `CMAKE_C_EXTENSIONS ON` | Emits `-std=gnuXX`. `OFF` emits `-std=cXX` (strict ISO). |
 
-In short: project wants modern C, but still allows the GNU extension set needed by low-level systems programming.
+Why `gnu23` and not strict `c23`:
+- Strict mode defines `__STRICT_ANSI__`; glibc then hides POSIX/GNU declarations unless a feature-test macro (`_POSIX_C_SOURCE`, `_GNU_SOURCE`) is defined. Affected: parts of `fork`/`signal`/`sigaction`, sockets, `strdup`-class functions, `MAP_ANONYMOUS`.
+- The `asm` keyword and `typeof` forms are GNU extensions in older modes (`__asm__` always works).
 
-## 3) Compile database for tooling
+Ordering constraint: `CMAKE_C_*` variables initialize the `C_STANDARD` / `C_EXTENSIONS` properties **when a target is created**. Set them before every `add_executable`.
+
+---
+
+## 4. Tooling Support
 
 ```cmake
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 ```
 
-This generates a `compile_commands.json` file. Tools like `clangd`, IDE indexers, and some linters use it to know the exact compiler flags for each source file.
+- Writes `compile_commands.json` into the **build** directory, containing the exact compiler command per source file.
+- Honored only by Makefile and Ninja generators.
+- `clangd` searches the project root and `build/`; for other build directory names pass `--compile-commands-dir=<dir>` or symlink the file into the root.
 
-This is important for editor support and accurate code navigation.
+---
 
-## 4) Default build type
+## 5. Build Type and Debug Flags
 
 ```cmake
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE Debug CACHE STRING "" FORCE)
+  set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
-```
-
-- If the user did not specify a build type (`Debug`, `Release`, `RelWithDebInfo`, etc.), this sets it to `Debug`.
-- `CACHE STRING "" FORCE` stores it in the CMake cache so it persists across builds.
-- This ensures the project defaults to a debuggable configuration.
-
-## 5) Debug flags
-
-```cmake
 set(CMAKE_C_FLAGS_DEBUG "-Og -g3")
 ```
 
-This appends debug-specific compiler flags for the `Debug` configuration:
+| Element | Meaning |
+|---|---|
+| `CMAKE_BUILD_TYPE` | Selects the config for **single-config** generators (Makefiles, Ninja). Empty by default → no optimization or debug flags. |
+| `CMAKE_CONFIGURATION_TYPES` | Non-empty for **multi-config** generators (Visual Studio, Xcode, Ninja Multi-Config); there, the config is chosen at build time (`--config`), so the guard skips setting a type. |
+| `CACHE ... FORCE` | Stores the default in the cache; the guard ensures a user-supplied `-DCMAKE_BUILD_TYPE=...` is never overwritten. |
+| `CMAKE_C_FLAGS_DEBUG` | **Replaces** the default (`-g`) for Debug. Flags apply only when the config is `Debug`. |
+| `-Og` | Optimizations that preserve debuggability. Variables can still appear as `<optimized out>`; switch to `-O0` when that blocks inspection. For Ch. 3, `-Og` yields assembly closest to the book's listings. |
+| `-g3` | Full DWARF plus **macro definitions** (usable in gdb: `info macro NAME`, `macro expand EXPR`). |
 
-- `-O0`/`-Og`: optimize for debugging readability rather than runtime speed.
-- `-g3`: include high-quality debug symbols, more complete than minimal `-g`.
+---
 
-This is a common choice for CSAPP-style code where readable assembly and debugging are more valuable than optimization.
-
-## 6) Optional sanitizer support
+## 6. Sanitizer Option
 
 ```cmake
 option(STUDY_SANITIZE "Enable ASan + UBSan" OFF)
 ```
 
-Creates a user-settable CMake option:
+- Defines a cache `BOOL`; set with `-DSTUDY_SANITIZE=ON`.
+- Cached: changing it requires re-running configure (it reuses the cached value otherwise).
 
-- default value: `OFF`
-- name: `STUDY_SANITIZE`
-- description: `Enable ASan + UBSan`
+---
 
-This lets the project optionally build with sanitizers when enabled via CMake, for example:
-
-```bash
-cmake -DSTUDY_SANITIZE=ON ..
-```
-
-## 7) Thread library
+## 7. Threads
 
 ```cmake
 find_package(Threads REQUIRED)
 ```
 
-This finds the system threading library and makes the imported target `Threads::Threads` available.
+- Provides imported target `Threads::Threads`, which adds `-pthread` or `-lpthread` as the platform needs.
+- On glibc ≥ 2.34 `libpthread` is merged into `libc`, but the target remains the portable form and also sets `-pthread` for compile-time macros.
+- Needed by Ch. 12 (concurrency) code only; harmless elsewhere.
 
-It is required because the project uses pthreads or thread-related APIs in C code, and CMake handles platform differences automatically.
+---
 
-## 8) Shared compile/link settings
+## 8. Shared Options Target
 
 ```cmake
 add_library(study_options INTERFACE)
-```
-
-Creates an interface library. It does not build an actual object file; it only carries compile and link properties to other targets.
-
-This is a clean pattern for common flags that apply to every chapter executable.
-
-```cmake
-target_compile_options(study_options INTERFACE
-  -Wall -Wextra -Wconversion -Wsign-compare -fno-common)
-```
-
-These flags are added to any target linking against `study_options`:
-
-- `-Wall`: enable most warning checks
-- `-Wextra`: enable extra warnings beyond `-Wall`
-- `-Wconversion`: warn about implicit conversions that may change values
-- `-Wsign-compare`: warn about signed/unsigned comparisons
-- `-fno-common`: avoid old-style global variable collisions from `-fcommon` behavior
-
-This makes the code stricter and easier to debug.
-
-```cmake
+target_compile_options(study_options INTERFACE -Wall -Wextra -Wconversion -Wsign-compare -fno-common)
 target_link_libraries(study_options INTERFACE Threads::Threads m)
 ```
 
-Links the common target against:
+An `INTERFACE` library has no sources or artifacts; its properties are **usage requirements** forwarded to every target that links it.
 
-- `Threads::Threads`: pthread support
-- `m`: the C math library (`libm`), commonly needed for functions like `sin`, `sqrt`, `pow`, etc.
+| Flag | Effect (C) |
+|---|---|
+| `-Wall -Wextra` | Core and extended warnings; `-Wextra` already includes `-Wsign-compare` in C. |
+| `-Wconversion` | Warns on implicit conversions that may change a value; in C this also enables `-Wsign-conversion`. Targets Ch. 2 bugs: truncation, signed ↔ unsigned. |
+| `-Wsign-compare` | Signed/unsigned comparison (`-1 < 0U`). Explicit for clarity. |
+| `-fno-common` | Uninitialized globals become strong symbols in `.bss`; duplicate definitions across files fail at link time instead of silently merging (default since GCC 10; explicit for older/other compilers). |
+| `m` | `libm` (`sqrt`, `pow`, `sin`, …). glibc does not link it implicitly; calls constant-folded at compile time may hide the need. |
 
-Because this is an `INTERFACE` library, these are propagated to all chapter executables that link against it.
+---
 
-## 9) Sanitizer configuration
+## 9. Sanitizers
 
 ```cmake
 if(STUDY_SANITIZE)
-  target_compile_options(study_options INTERFACE
-    -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_compile_options(study_options INTERFACE -fsanitize=address,undefined -fno-omit-frame-pointer)
   target_link_options(study_options INTERFACE -fsanitize=address,undefined)
 endif()
 ```
 
-When `STUDY_SANITIZE=ON`:
+| Item | Detail |
+|---|---|
+| ASan | Heap/stack/global out-of-bounds, use-after-free, double free, leaks (LeakSanitizer on Linux) |
+| UBSan | Signed overflow, invalid shifts, null/misaligned access, `INT_MIN / -1`, … |
+| Compile **and** link flag | The runtime library is linked by the same flag; omitting it at link time yields undefined sanitizer symbols. |
+| `-fno-omit-frame-pointer` | Reliable stack traces in reports. |
+| Limits | Incompatible with `-static`, `-fsanitize=thread`, and Valgrind. Adds red zones and shadow memory, **changing stack/heap layout**: build layout-dependent experiments (Ch. 3 buffer overflow, Ch. 9 allocator addresses) without it. |
 
-- `-fsanitize=address,undefined` enables AddressSanitizer (ASan) and UndefinedBehaviorSanitizer (UBSan)
-- `-fno-omit-frame-pointer` keeps frame pointers for better sanitizer reports
-- `target_link_options` makes the linker add the same sanitizers at link time
+---
 
-This gives cleaner catch points for memory errors and undefined behavior during development.
-
-## 10) Discover chapter directories and build one executable per chapter
-
-```cmake
-file(GLOB chapter_dirs RELATIVE ${CMAKE_SOURCE_DIR} CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/ch*)
-```
-
-This collects all top-level directories whose names start with `ch`:
-
-- example: `ch0`, `ch1`, `ch2`, etc.
-- `RELATIVE ${CMAKE_SOURCE_DIR}` makes each entry relative to the project root
-- `CONFIGURE_DEPENDS` tells CMake to re-detect changes automatically when directories are added or removed
-
-This is a simple project layout: source files are grouped by chapter folder.
+## 10. Chapter Discovery and Targets
 
 ```cmake
+file(GLOB chapter_dirs RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/ch[0-9]*)
 foreach(dir IN LISTS chapter_dirs)
-  if(IS_DIRECTORY ${CMAKE_SOURCE_DIR}/${dir})
+  if(IS_DIRECTORY ${PROJECT_SOURCE_DIR}/${dir})
+    file(GLOB srcs CONFIGURE_DEPENDS ${PROJECT_SOURCE_DIR}/${dir}/*.c)
+    if(srcs)
+      add_executable(${dir} ${srcs})
+      ...
 ```
 
-Loop over each chapter folder and only continue if it really is a directory.
-
-## 11) Gather source files inside each chapter
+| Element | Detail |
+|---|---|
+| `file(GLOB ...)` | Evaluated at configure time; the result is a snapshot. |
+| `CONFIGURE_DEPENDS` | Re-runs the glob at **build** time and re-configures when the result changes, so added/removed files and directories are detected. Cost: one directory scan per build. CMake documentation discourages `GLOB` for sources; acceptable here because targets are intentionally implicit. |
+| `RELATIVE` | Entries become `ch1` instead of absolute paths; the loop variable doubles as target name. |
+| `IS_DIRECTORY` | Excludes files matching `ch[0-9]*`. |
+| `if(srcs)` | Skips chapters without `.c` files (no empty target). |
+| Target name = directory name | `ch1` → target `ch1`, binary `<build>/ch1`. |
+| Rule | All `.c` files in a chapter directory link into **one** executable: exactly one `main` per directory. Standalone experiments need their own directory. |
 
 ```cmake
-file(GLOB srcs CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/${dir}/*.c)
-```
-
-This finds all `.c` files in the current chapter directory.
-
-Example:
-
-```text
-ch1/main.c
-ch1/bitops.c
-ch1/printf_demo.c
-```
-
-`srcs` becomes a list of those files.
-
-## 12) Create one executable per chapter
-
-```cmake
-if(srcs)
-  add_executable(${dir} ${srcs})
-```
-
-If the chapter contains any C source files, an executable is created with the same name as the chapter directory.
-
-Example:
-
-- `ch0` -> executable target named `ch0`
-- `ch1` -> executable target named `ch1`
-
-This avoids writing a separate `add_executable` line for each chapter by auto-discovering them.
-
-## 13) Include directories and link common settings
-
-```cmake
-target_include_directories(${dir} PRIVATE ${CMAKE_SOURCE_DIR}/${dir} ${CMAKE_SOURCE_DIR}/include)
-```
-
-Adds include paths for the target:
-
-- the chapter's own directory
-- the top-level `include` directory
-
-This allows source files in a chapter to include local headers and shared project headers without manual path fiddling.
-
-```cmake
+target_include_directories(${dir} PRIVATE ${PROJECT_SOURCE_DIR}/${dir} ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(${dir} PRIVATE study_options)
 ```
 
-Links each chapter executable to the shared `study_options` interface library.
+- `#include "x.h"` already searches the including file's directory; the chapter directory entry matters only for `#include <x.h>`.
+- `PRIVATE` is correct for executables (nothing links against them).
+- Linking `study_options` is the only step that applies warnings, sanitizers, `Threads`, and `m`; a target that skips it gets none of them.
 
-This propagates the warning flags, math library, and thread library to every chapter target.
+---
 
-## 14) Final behavior of the project
+## 11. Per-target Overrides
 
-This CMakeLists does the following in one build system:
+Targets exist only after the loop; overrides must come **after** it.
 
-1. Require a modern C toolchain.
-2. Set up Debug builds by default.
-3. Enable useful warnings and strict compile settings.
-4. Optionally enable sanitizers.
-5. Discover each chapter directory.
-6. Compile every `.c` file in that chapter into an executable.
-7. Apply common include and link settings to each chapter binary.
-
-## 15) Why this structure fits the project
-
-This is a good fit for a study repository with many independent chapter programs:
-
-- no need to maintain a long explicit target list
-- adding a new chapter folder automatically creates a new executable
-- shared compile settings stay consistent across chapters
-- toolchain hygiene is built in (`-Wall`, sanitizers, debug symbols)
-
-## 16) Typical build
-
-```bash
-cmake -S . -B build
-cmake --build build
+```cmake
+if(TARGET ch3)
+  target_compile_options(ch3 PRIVATE -fno-stack-protector -fcf-protection=none)
+  target_link_options(ch3 PRIVATE -no-pie)
+endif()
 ```
 
-Then each chapter is built as a separate executable under the build directory.
+| Flag | Purpose |
+|---|---|
+| `-fno-stack-protector` | Remove canary (buffer-overflow experiments) |
+| `-no-pie` | Fixed code addresses |
+| `-fcf-protection=none` | Drop `endbr64` landing pads for cleaner disassembly |
+| `-z execstack` (link) | Executable stack for code-injection experiments |
 
-## 17) One-line summary
+---
 
-This file is a compact build configuration that turns the project into a collection of chapter-based C executables, with strict warnings, debug-friendly settings, optional sanitizers, and shared link-time configuration.
+## 12. Commands
+
+```bash
+cmake -S . -B build                         # configure (Debug by default)
+cmake --build build -j                      # build all chapters
+cmake --build build --target ch1            # build one chapter
+./build/ch1                                 # run
+
+cmake -S . -B build-asan -DSTUDY_SANITIZE=ON    # separate tree for sanitizers
+cmake -S . -B build-rel  -DCMAKE_BUILD_TYPE=Release
+cmake -S . -B build -G Ninja                # faster incremental builds
+```
+
+- One build directory per configuration; the cache fixes `CMAKE_BUILD_TYPE` and `STUDY_SANITIZE` per tree.
+- `-DCMAKE_C_COMPILER=clang` selects the compiler at first configure only (delete the build directory to change it).
+
+---
+
+## 13. Pitfalls
+
+| Pitfall | Cause / Fix |
+|---|---|
+| New chapter not built | Glob not re-run → `CONFIGURE_DEPENDS` handles it; verify the directory name matches `ch[0-9]*`. |
+| `multiple definition of main` | Two `main` functions in one chapter directory. |
+| `undefined reference to sqrt` | Target does not link `study_options` (or `m`). |
+| `unknown type name` / missing POSIX symbol | `CMAKE_C_EXTENSIONS OFF` or missing feature-test macro. |
+| Sanitizer flag ignored | Cached `STUDY_SANITIZE=OFF` in an old build tree; pass `-D` explicitly or use a fresh directory. |
+| `-std=c23` rejected | Compiler older than GCC 14 / Clang 18 with `STANDARD_REQUIRED ON`. |
+| Debugger shows `<optimized out>` | Use `-O0` in `CMAKE_C_FLAGS_DEBUG`. |
